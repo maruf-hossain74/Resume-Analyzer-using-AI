@@ -1,753 +1,539 @@
 import React, { useState } from "react";
 import {
+  Users,
   Upload,
-  ArrowLeft,
   Loader,
-  TrendingUp,
-  Mail,
   Trash2,
-  Send,
+  Mail,
+  FileUp,
+  ChevronDown,
+  CheckCircle,
 } from "lucide-react";
-import * as pdfjs from "pdfjs-dist";
-import * as Tesseract from "tesseract.js";
-import pdfWorker from "pdfjs-dist/build/pdf.worker.min?url";
 
-pdfjs.GlobalWorkerOptions.workerSrc = pdfWorker;
+// Load PDF.js worker
+let pdfjsLib = null;
 
-export default function ResumeRanker({ onBack, jobDescription: initialJobDescription }) {
-  const [candidates, setCandidates] = useState([]);
+const loadPdfLib = async () => {
+  if (pdfjsLib) return pdfjsLib;
+  
+  const script = document.createElement('script');
+  script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+  script.async = true;
+  
+  return new Promise((resolve) => {
+    script.onload = () => {
+      pdfjsLib = window.pdfjsLib;
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      resolve(pdfjsLib);
+    };
+    document.head.appendChild(script);
+  });
+};
+
+const extractTextFromPdf = async (arrayBuffer) => {
+  try {
+    const pdfLib = await loadPdfLib();
+    const pdf = await pdfLib.getDocument({ data: arrayBuffer }).promise;
+    let extractedText = '';
+    
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const textContent = await page.getTextContent();
+      const pageText = textContent.items
+        .map(item => item.str)
+        .join(' ');
+      extractedText += pageText + '\n';
+    }
+    
+    return extractedText.trim();
+  } catch (error) {
+    console.error('PDF extraction error:', error);
+    throw new Error('Failed to extract text from PDF: ' + error.message);
+  }
+};
+
+const extractJSON = (text) => {
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[0]);
+  } catch {
+    return null;
+  }
+};
+
+export default function ResumeRanker({ aiReady }) {
+  const [resumes, setResumes] = useState([]);
+  const [jobDescription, setJobDescription] = useState("");
+  const [rankings, setRankings] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [extracting, setExtracting] = useState(false);
-  const [selectedCandidates, setSelectedCandidates] = useState(new Set());
-  const [emailModal, setEmailModal] = useState(false);
-  const [emailSubject, setEmailSubject] = useState("Interview Opportunity");
-  const [emailMessage, setEmailMessage] = useState(
-    "We are impressed with your profile and would like to invite you for an interview."
-  );
-  const [sendingEmail, setSendingEmail] = useState(false);
-  const [jobDescription, setJobDescription] = useState(initialJobDescription || "");
+  const [emailStatus, setEmailStatus] = useState({});
+  const [emailDialog, setEmailDialog] = useState(null);
+  const [emailForm, setEmailForm] = useState({ email: "", subject: "", body: "" });
 
-  const extractTextFromFile = async (file) => {
-    try {
-      setExtracting(true);
-      
-      if (file.type === "application/pdf") {
-        const arrayBuffer = await file.arrayBuffer();
-        const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
-        let text = "";
+  const handleResumeUpload = async (e) => {
+    const files = e.target.files;
+    if (!files) return;
 
-        for (let i = 1; i <= pdf.numPages; i++) {
+    for (let file of files) {
+      // Handle images directly with Puter's img2txt
+      if (file.type.startsWith("image/")) {
+        try {
+          const extractedText = await window.puter.ai.img2txt(file);
+          
+          if (extractedText && extractedText.trim()) {
+            addResume(file.name, extractedText);
+          } else {
+            addResume(file.name, "⚠️ No text found in image. Please use a clearer image or upload as .txt file.");
+          }
+        } catch (err) {
+          console.error("OCR error:", err);
+          addResume(file.name, "Error extracting text from image: " + err.message);
+        }
+      } else {
+        // For other file types, use FileReader
+        const reader = new FileReader();
+        reader.onload = async (event) => {
+          const content = event.target?.result;
+
           try {
-            const page = await pdf.getPage(i);
-            const textContent = await page.getTextContent();
-            const pageText = textContent.items
-              .map((item) => item.str || "")
-              .join(" ");
-            text += pageText + "\n";
-          } catch (pageError) {
-            console.warn(`Could not extract page ${i}`);
+            if (file.type === "application/pdf") {
+              try {
+                const extractedText = await extractTextFromPdf(content);
+                
+                if (extractedText && extractedText.trim()) {
+                  addResume(file.name, extractedText);
+                } else {
+                  addResume(file.name, "❌ No text found in PDF. Please try:\n• Use a text-based PDF (not scanned image)\n• Upload a .txt file instead");
+                }
+              } catch (err) {
+                console.error("PDF Error:", err);
+                addResume(file.name, `❌ Error reading PDF: ${err.message}\n\nPlease try:\n• Use a different PDF\n• Upload a .txt file`);
+              }
+            } else {
+              // Other file types (text, etc)
+              try {
+                const text = new TextDecoder().decode(new Uint8Array(content));
+                addResume(file.name, text);
+              } catch (err) {
+                addResume(file.name, "Error reading file: " + err.message);
+              }
+            }
+          } catch (err) {
+            console.error("File read error:", err);
           }
-        }
-        
-        setExtracting(false);
-        return text;
-      } else if (file.type.startsWith("image/")) {
-        const result = await Tesseract.recognize(file, "eng");
-        setExtracting(false);
-        return result.data.text;
-      }
-      
-      setExtracting(false);
-      return "";
-    } catch (error) {
-      console.error("Error extracting text:", error);
-      setExtracting(false);
-      return "";
-    }
-  };
-
-  const handleFileUpload = async (e) => {
-    const files = Array.from(e.target.files || []);
-    if (files.length === 0) return;
-
-    setLoading(true);
-    const newCandidates = [];
-
-    for (const file of files) {
-      const resumeText = await extractTextFromFile(file);
-      
-      if (resumeText.trim()) {
-        const analysis = analyzeResume(resumeText);
-        newCandidates.push({
-          id: Date.now() + Math.random(),
-          fileName: file.name,
-          resumeText,
-          email: extractEmail(resumeText) || "",
-          phone: extractPhone(resumeText) || "",
-          name: extractName(resumeText) || "Unknown",
-          ...analysis,
-        });
+        };
+        reader.readAsArrayBuffer(file);
       }
     }
-
-    setCandidates([...candidates, ...newCandidates].sort((a, b) => b.matchPercentage - a.matchPercentage));
-    setLoading(false);
   };
 
-  const analyzeResume = (resume) => {
-    const resumeSkills = extractSkills(resume);
-    const jobSkills = jobDescription ? extractSkills(jobDescription) : { technical: [], soft: [] };
-    
-    const matchPercentage = calculateMatch(resume, jobDescription);
-    const atsScore = calculateATSScore(resume);
-
-    return {
-      resumeText: resume,
-      resumeSkills,
-      jobSkills,
-      matchPercentage,
-      atsScore,
-      missingSkills: jobSkills.technical.filter(
-        (skill) => !resumeSkills.technical.includes(skill)
-      ),
-      presentSkills: resumeSkills.technical.filter((skill) =>
-        jobSkills.technical.includes(skill)
-      ),
-    };
+  const addResume = (name, text) => {
+    setResumes((prev) => [
+      ...prev,
+      {
+        id: Date.now() + Math.random(),
+        name,
+        text,
+        preview: text.substring(0, 150) + "...",
+      },
+    ]);
   };
 
-  const levenshteinDistance = (s1, s2) => {
-    const len1 = s1.length;
-    const len2 = s2.length;
-    const matrix = Array(len2 + 1)
-      .fill(null)
-      .map(() => Array(len1 + 1).fill(0));
-
-    for (let i = 0; i <= len1; i++) matrix[0][i] = i;
-    for (let j = 0; j <= len2; j++) matrix[j][0] = j;
-
-    for (let j = 1; j <= len2; j++) {
-      for (let i = 1; i <= len1; i++) {
-        const indicator = s1[i - 1] === s2[j - 1] ? 0 : 1;
-        matrix[j][i] = Math.min(
-          matrix[j][i - 1] + 1,
-          matrix[j - 1][i] + 1,
-          matrix[j - 1][i - 1] + indicator
-        );
-      }
-    }
-
-    return matrix[len2][len1];
+  const deleteResume = (id) => {
+    setResumes((prev) => prev.filter((r) => r.id !== id));
   };
 
-  const calculateSemanticSimilarity = (term1, term2) => {
-    const maxLen = Math.max(term1.length, term2.length);
-    if (maxLen === 0) return 1.0;
-    const distance = levenshteinDistance(term1, term2);
-    return 1 - distance / maxLen;
-  };
-
-  const extractConcepts = (text) => {
-    const textLower = text.toLowerCase();
-    const concepts = new Set();
-
-    const semanticThesaurus = {
-      "frontend": ["react", "vue", "angular", "svelte", "html", "css", "sass", "less", "bootstrap", "tailwind", "javascript", "typescript", "responsive", "ui", "ux", "jsx", "tsx"],
-      "backend": ["nodejs", "node.js", "python", "java", "spring", "django", "flask", "fastapi", "laravel", "rails", "api", "rest", "graphql", "express"],
-      "database": ["sql", "mongodb", "postgresql", "mysql", "firebase", "redis", "nosql", "elasticsearch", "cassandra", "oracle", "mariadb"],
-      "devops": ["docker", "kubernetes", "ci/cd", "jenkins", "gitlab", "github actions", "terraform", "ansible", "aws", "gcp", "azure", "automation"],
-      "cloud": ["aws", "azure", "gcp", "cloud", "serverless", "lambda", "ec2", "s3", "cloudflare", "heroku"],
-      "testing": ["jest", "pytest", "junit", "testing", "unit test", "integration test", "e2e", "test", "mocha", "rspec", "cucumber"],
-      "version control": ["git", "github", "gitlab", "bitbucket", "svn", "version control", "scm"],
-      "tools": ["webpack", "vite", "babel", "npm", "yarn", "pnpm", "maven", "gradle", "parcel", "rollup"],
-      "communication": ["communication", "collaboration", "teamwork", "presentation", "writing", "documentation"],
-      "leadership": ["leadership", "management", "mentoring", "coaching", "delegation", "team lead"],
-      "problem solving": ["problem solving", "debugging", "optimization", "critical thinking", "analysis", "troubleshooting"],
-      "mobile": ["react native", "flutter", "swift", "kotlin", "android", "ios", "mobile development", "xamarin"],
-      "ai_ml": ["machine learning", "deep learning", "tensorflow", "pytorch", "keras", "scikit-learn", "ai", "nlp", "cv", "artificial intelligence", "data science"],
-      "security": ["security", "encryption", "ssl", "tls", "authentication", "authorization", "jwt", "oauth", "penetration testing"],
-    };
-
-    Object.entries(semanticThesaurus).forEach(([key, relatedTerms]) => {
-      if (textLower.includes(key.replace("_", " "))) {
-        concepts.add(key.replace("_", " "));
-      }
-      relatedTerms.forEach((term) => {
-        if (textLower.includes(term)) {
-          concepts.add(key.replace("_", " "));
-        }
-      });
-    });
-
-    return Array.from(concepts);
-  };
-
-  const calculateMatch = (resume, jobDesc) => {
-    if (!jobDesc || !jobDesc.trim()) return 50;
-
-    const resumeText = resume.toLowerCase();
-    const jobDescText = jobDesc.toLowerCase();
-
-    // First try concept-based matching
-    const resumeConcepts = extractConcepts(resume);
-    const jobConcepts = extractConcepts(jobDesc);
-
-    let totalScore = 0;
-    let conceptMatches = 0;
-
-    // Score concepts
-    if (jobConcepts.length > 0) {
-      jobConcepts.forEach((jobConcept) => {
-        if (resumeConcepts.includes(jobConcept)) {
-          totalScore += 100;
-          conceptMatches += 1;
-        } else {
-          const similarConcepts = resumeConcepts.filter(
-            (concept) => calculateSemanticSimilarity(jobConcept, concept) > 0.6
-          );
-          if (similarConcepts.length > 0) {
-            totalScore += 60;
-            conceptMatches += 1;
-          }
-        }
-      });
-    }
-
-    // Also do keyword-based matching as supplementary
-    const jobKeywords = jobDescText
-      .split(/\s+/)
-      .filter(w => w.length > 4 && !["with", "from", "must", "have", "that", "your", "will", "able"].includes(w));
-    
-    let keywordMatches = 0;
-    jobKeywords.forEach((keyword) => {
-      if (resumeText.includes(keyword)) {
-        keywordMatches++;
-      }
-    });
-
-    // Combine both scoring methods
-    let finalScore = 0;
-    
-    if (jobConcepts.length > 0) {
-      const conceptScore = (totalScore / (jobConcepts.length * 100)) * 100;
-      const keywordScore = jobKeywords.length > 0 
-        ? (keywordMatches / jobKeywords.length) * 100 
-        : 0;
-      
-      // Weight: 60% concepts, 40% keywords
-      finalScore = (conceptScore * 0.6) + (keywordScore * 0.4);
-    } else {
-      // Fallback to keyword-only matching
-      finalScore = jobKeywords.length > 0 
-        ? Math.round((keywordMatches / jobKeywords.length) * 100)
-        : 50;
-    }
-
-    return Math.min(Math.max(Math.round(finalScore), 0), 100);
-  };
-
-  const calculateATSScore = (resume) => {
-    let score = 50;
-
-    const sections = [
-      "experience",
-      "education",
-      "skills",
-      "projects",
-      "certification",
-    ];
-    const foundSections = sections.filter((section) =>
-      resume.toLowerCase().includes(section)
-    );
-    score += foundSections.length * 5;
-
-    if ((resume.match(/[•\-\*]/g) || []).length > 5) score += 10;
-
-    const actionVerbs = [
-      "developed",
-      "managed",
-      "led",
-      "created",
-      "implemented",
-      "designed",
-    ];
-    if (actionVerbs.some((verb) => resume.toLowerCase().includes(verb)))
-      score += 5;
-
-    return Math.min(score, 100);
-  };
-
-  const extractSkills = (text) => {
-    const textLower = text.toLowerCase();
-    const technicalSkills = [
-      "javascript", "typescript", "python", "java", "react", "vue", "angular",
-      "node.js", "express", "django", "flask", "sql", "mongodb", "aws", "azure",
-      "docker", "kubernetes", "git", "rest api", "graphql", "html", "css",
-      "devops", "ci/cd", "jenkins", "terraform", "ansible", "kafka", "redis",
-      "testing", "jest", "pytest", "agile", "scrum", "kubernetes", "machine learning",
-    ];
-
-    const softSkills = [
-      "communication", "leadership", "problem solving", "teamwork",
-      "project management", "critical thinking", "time management",
-    ];
-
-    const foundTechnical = technicalSkills.filter((skill) =>
-      textLower.includes(skill)
-    );
-    const foundSoft = softSkills.filter((skill) => textLower.includes(skill));
-
-    return {
-      technical: [...new Set(foundTechnical)],
-      soft: [...new Set(foundSoft)],
-    };
-  };
-
-  const extractEmail = (text) => {
-    const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
-    const match = text.match(emailRegex);
-    return match ? match[0] : "";
-  };
-
-  const extractPhone = (text) => {
-    const phoneRegex = /(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/;
-    const match = text.match(phoneRegex);
-    return match ? match[0] : "";
-  };
-
-  const extractName = (text) => {
-    const lines = text.split("\n");
-    return lines[0]?.trim().substring(0, 50) || "Candidate";
-  };
-
-  const toggleSelection = (id) => {
-    const newSelected = new Set(selectedCandidates);
-    if (newSelected.has(id)) {
-      newSelected.delete(id);
-    } else {
-      newSelected.add(id);
-    }
-    setSelectedCandidates(newSelected);
-  };
-
-  const deleteCandidate = (id) => {
-    setCandidates(candidates.filter((c) => c.id !== id));
-  };
-
-  const handleSendEmails = async () => {
-    if (selectedCandidates.size === 0) {
-      alert("Please select candidates to send emails");
+  const rankResumes = async () => {
+    if (!resumes.length || !jobDescription.trim()) {
+      alert("Please upload resumes and provide a job description");
       return;
     }
 
-    setSendingEmail(true);
+    setLoading(true);
+    setRankings(null);
 
-    const selectedList = candidates.filter((c) =>
-      selectedCandidates.has(c.id)
-    );
+    const resumesList = resumes
+      .map((r, i) => `CANDIDATE_NAME: ${r.name}\nCONTENT:\n${r.text}`)
+      .join("\n\n---NEXT_CANDIDATE---\n\n");
 
-    // Simulate sending emails (in production, use EmailJS or backend API)
-    for (const candidate of selectedList) {
-      if (candidate.email) {
-        console.log(
-          `Email sent to ${candidate.name} (${candidate.email}):`,
-          emailMessage
-        );
-        // In production, use:
-        // await sendEmail(candidate.email, emailSubject, emailMessage);
-      }
+    const prompt = `
+You are an expert HR recruiter. Rank the following candidates based on the job description.
+
+JOB DESCRIPTION:
+${jobDescription}
+
+RESUMES (Each candidate is marked with CANDIDATE_NAME):
+${resumesList}
+
+Rank them from best to worst fit. For each candidate, use the exact filename as the candidateName in your response.
+
+Return ONLY JSON with NO additional text:
+{
+  "rankedCandidates": [
+    {
+      "rank": 1,
+      "candidateName": "EXACT_FILENAME_HERE",
+      "score": 0-100,
+      "verdict": "Strong Fit / Good Fit / Moderate Fit / Weak Fit",
+      "strengths": ["strength1", "strength2"],
+      "gaps": ["gap1", "gap2"],
+      "overallAssessment": "1-2 sentence summary"
     }
+  ]
+}
+`;
 
-    setSendingEmail(false);
+    try {
+      const res = await window.puter.ai.chat(prompt);
+      const text = typeof res === "string" ? res : res.message?.content || res;
+      const parsed = extractJSON(text);
+
+      if (parsed) {
+        setRankings(parsed.rankedCandidates);
+      } else {
+        alert("Failed to rank resumes. Please try again.");
+      }
+    } catch (err) {
+      alert("Error: " + err.message);
+    }
+    setLoading(false);
+  };
+
+  const openEmailDialog = (candidate, index) => {
+    setEmailDialog({
+      candidateName: candidate.candidateName,
+      index,
+      position: "Senior Software Engineer", // default
+    });
+    setEmailForm({
+      email: "candidate@example.com",
+      subject: `Interview Invitation - ${candidate.candidateName}`,
+      body: `Dear ${candidate.candidateName},\n\nWe are pleased to invite you to interview for the Senior Software Engineer position.\n\nPlease confirm your availability at your earliest convenience.\n\nBest regards,\nHR Team`,
+    });
+  };
+
+  const sendInterviewInvite = async () => {
+    if (!emailDialog) return;
+
+    // For demo, we'll use Puter's mail functionality if available
+    // In production, you'd use a backend service
     alert(
-      `Email templates prepared for ${selectedList.length} candidates. In production, integrate EmailJS or your email service.`
+      `Email would be sent to: ${emailForm.email}\n\nSubject: ${emailForm.subject}\n\nBody: ${emailForm.body}`
     );
-    setEmailModal(false);
-    setSelectedCandidates(new Set());
+    setEmailStatus((prev) => ({
+      ...prev,
+      [emailDialog.index]: "sent",
+    }));
+    setEmailDialog(null);
   };
 
-  const getRankBadge = (percentage) => {
-    if (percentage >= 80) return { color: "bg-emerald-600", label: "Excellent" };
-    if (percentage >= 60) return { color: "bg-blue-600", label: "Good" };
-    if (percentage >= 40) return { color: "bg-amber-600", label: "Fair" };
-    return { color: "bg-red-600", label: "Poor" };
-  };
+  if (!aiReady) {
+    return (
+      <div className="max-w-md mx-auto text-center py-20">
+        <Loader className="w-12 h-12 animate-spin mx-auto mb-4 text-purple-400" />
+        <p className="text-gray-400">Loading AI capabilities...</p>
+      </div>
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900">
-      <div className="max-w-7xl mx-auto px-6 py-8">
-        {/* Header */}
-        <div className="mb-12">
-          <div className="flex items-center justify-between mb-6">
-            <div className="flex items-center gap-4">
-              <div className="bg-gradient-to-br from-blue-600 to-cyan-600 p-3 rounded-xl">
-                <TrendingUp className="w-8 h-8 text-white" />
-              </div>
-              <div>
-                <h1 className="text-4xl font-bold text-white tracking-tight">Resume Ranker</h1>
-                <p className="text-slate-400 text-sm mt-1">Bulk Resume Analysis & Candidate Ranking</p>
-              </div>
-            </div>
-            {onBack && (
-              <button
-                onClick={onBack}
-                className="flex items-center gap-2 px-5 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-slate-200 transition-colors font-medium"
-              >
-                <ArrowLeft className="w-4 h-4" />
-                Back
-              </button>
-            )}
-          </div>
-          <div className="h-0.5 bg-gradient-to-r from-blue-600 via-cyan-600 to-transparent"></div>
-        </div>
+    <div className="max-w-7xl mx-auto px-6 pb-20 pt-10">
+      <h1 className="text-4xl font-bold mb-2">Resume Ranker for HR</h1>
+      <p className="text-gray-400 mb-8">
+        Upload multiple resumes and let AI automatically rank candidates for
+        your position.
+      </p>
 
-        {/* Main Content */}
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
-          {/* Upload Section */}
-          <div className="lg:col-span-1">
-            <div className="bg-slate-800 rounded-xl p-8 border border-slate-700 sticky top-8">
-              {/* Job Description */}
-              <div className="mb-6">
-                <label className="block text-sm font-bold text-white mb-2">Job Description</label>
-                <textarea
-                  value={jobDescription}
-                  onChange={(e) => setJobDescription(e.target.value)}
-                  placeholder="Paste job description here for better matching..."
-                  className="w-full bg-slate-700 text-white px-3 py-2 rounded-lg border border-slate-600 focus:border-blue-500 focus:outline-none text-sm resize-none h-24"
-                />
-              </div>
+      {!rankings ? (
+        <div className="grid lg:grid-cols-[1fr_1fr] gap-8">
+          {/* Left Panel - Uploads */}
+          <div className="space-y-6">
+            {/* Resume Uploads */}
+            <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 space-y-4">
+              <h3 className="font-bold text-lg flex items-center gap-2">
+                <Users className="w-5 h-5 text-purple-400" />
+                Upload Resumes (Multiple)
+              </h3>
 
-              <h2 className="text-lg font-bold text-white mb-6">Upload Resumes</h2>
-              
-              <div className="border-2 border-dashed border-slate-600 rounded-xl p-8 text-center hover:border-blue-500 hover:bg-slate-700/30 transition-all cursor-pointer mb-6">
+              <label className="flex items-center justify-center gap-2 p-8 border-2 border-dashed border-gray-700 rounded-lg cursor-pointer hover:border-purple-500 transition">
                 <input
                   type="file"
                   multiple
-                  accept=".pdf,image/*"
-                  onChange={handleFileUpload}
-                  disabled={loading || extracting}
+                  accept=".pdf,.txt,.doc,.docx,image/*"
+                  onChange={handleResumeUpload}
                   className="hidden"
-                  id="resume-input"
                 />
-                <label htmlFor="resume-input" className="cursor-pointer block">
-                  {extracting || loading ? (
-                    <>
-                      <Loader className="w-12 h-12 text-blue-400 mx-auto mb-3 animate-spin" />
-                      <p className="text-white font-semibold text-sm">Processing...</p>
-                    </>
-                  ) : (
-                    <>
-                      <Upload className="w-12 h-12 text-blue-400 mx-auto mb-3" />
-                      <p className="text-white font-semibold text-sm">Upload PDFs or Images</p>
-                      <p className="text-slate-400 text-xs mt-2">Multiple files supported</p>
-                    </>
-                  )}
-                </label>
-              </div>
+                <FileUp className="w-6 h-6 text-purple-400" />
+                <span className="font-semibold">
+                  Upload one or more resumes
+                </span>
+              </label>
 
-              {/* Stats */}
-              {candidates.length > 0 && (
-                <div className="space-y-3 bg-slate-700/50 rounded-lg p-4">
-                  <div className="text-center">
-                    <p className="text-slate-400 text-sm">Total Candidates</p>
-                    <p className="text-2xl font-bold text-white">{candidates.length}</p>
-                  </div>
-                  <div className="text-center">
-                    <p className="text-slate-400 text-sm">Selected</p>
-                    <p className="text-2xl font-bold text-blue-400">{selectedCandidates.size}</p>
-                  </div>
-                </div>
-              )}
-
-              {/* Action Buttons */}
-              {candidates.length > 0 && (
-                <div className="space-y-3 mt-6">
-                  <button
-                    onClick={() => setEmailModal(true)}
-                    disabled={selectedCandidates.size === 0}
-                    className="w-full bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-700 hover:to-cyan-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold py-3 rounded-lg transition-all flex items-center justify-center gap-2"
-                  >
-                    <Mail className="w-5 h-5" />
-                    Send Email
-                  </button>
-                  <button
-                    onClick={() => {
-                      setCandidates([]);
-                      setSelectedCandidates(new Set());
-                    }}
-                    className="w-full bg-red-600/20 hover:bg-red-600/30 text-red-300 font-semibold py-3 rounded-lg transition-all flex items-center justify-center gap-2"
-                  >
-                    <Trash2 className="w-5 h-5" />
-                    Clear All
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Candidates List */}
-          <div className="lg:col-span-3">
-            {candidates.length === 0 ? (
-              <div className="bg-slate-800 rounded-xl p-16 border border-slate-700 text-center">
-                <Upload className="w-16 h-16 text-slate-500 mx-auto mb-4 opacity-50" />
-                <p className="text-slate-400 text-lg font-medium">No resumes uploaded yet</p>
-                <p className="text-slate-500 text-sm mt-2">Upload PDF or image resumes to see rankings</p>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {candidates.map((candidate) => {
-                  const badge = getRankBadge(candidate.matchPercentage);
-                  const isSelected = selectedCandidates.has(candidate.id);
-
-                  return (
-                    <div
-                      key={candidate.id}
-                      className={`bg-slate-800 rounded-xl p-6 border transition-all cursor-pointer ${
-                        isSelected
-                          ? "border-blue-500 bg-slate-800/60"
-                          : "border-slate-700 hover:border-slate-600"
-                      }`}
-                      onClick={() => toggleSelection(candidate.id)}
-                    >
-                      <div className="flex items-start justify-between mb-4">
-                        <div className="flex items-start gap-4 flex-1">
-                          <input
-                            type="checkbox"
-                            checked={isSelected}
-                            onChange={() => toggleSelection(candidate.id)}
-                            className="w-5 h-5 mt-1 cursor-pointer accent-blue-600"
-                            onClick={(e) => e.stopPropagation()}
-                          />
-                          <div className="flex-1">
-                            <h3 className="text-lg font-bold text-white mb-1">
-                              {candidate.name}
-                            </h3>
-                            <div className="flex flex-wrap gap-3 text-sm text-slate-400">
-                              {candidate.email && (
-                                <a
-                                  href={`mailto:${candidate.email}`}
-                                  className="text-blue-400 hover:underline"
-                                  onClick={(e) => e.stopPropagation()}
-                                >
-                                  {candidate.email}
-                                </a>
-                              )}
-                              {candidate.phone && <span>{candidate.phone}</span>}
-                            </div>
-                          </div>
+              {resumes.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-sm text-gray-400">
+                    {resumes.length} resume(s) uploaded
+                  </p>
+                  <div className="space-y-2 max-h-64 overflow-y-auto">
+                    {resumes.map((resume) => (
+                      <div
+                        key={resume.id}
+                        className="bg-gray-800 p-3 rounded-lg flex justify-between items-start gap-3"
+                      >
+                        <div className="flex-1 min-w-0">
+                          <p className="font-semibold text-sm truncate">
+                            {resume.name}
+                          </p>
+                          <p className="text-xs text-gray-400 mt-1">
+                            {resume.preview}
+                          </p>
                         </div>
                         <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            deleteCandidate(candidate.id);
-                          }}
-                          className="p-2 hover:bg-red-600/20 rounded-lg transition-colors text-red-400"
+                          onClick={() => deleteResume(resume.id)}
+                          className="p-2 hover:bg-red-900/20 rounded text-red-400"
                         >
-                          <Trash2 className="w-5 h-5" />
+                          <Trash2 className="w-4 h-4" />
                         </button>
                       </div>
-
-                      {/* Scores */}
-                      <div className="grid grid-cols-3 gap-4 mb-4">
-                        <div className="bg-slate-700/50 rounded-lg p-3">
-                          <p className="text-slate-400 text-xs mb-1">Job Match</p>
-                          <div className="flex items-center gap-2">
-                            <span className="text-2xl font-bold text-white">
-                              {candidate.matchPercentage}%
-                            </span>
-                            <span className={`${badge.color} text-white text-xs font-semibold px-2 py-1 rounded`}>
-                              {badge.label}
-                            </span>
-                          </div>
-                        </div>
-                        <div className="bg-slate-700/50 rounded-lg p-3">
-                          <p className="text-slate-400 text-xs mb-1">ATS Score</p>
-                          <p className="text-2xl font-bold text-emerald-400">{candidate.atsScore}</p>
-                        </div>
-                        <div className="bg-slate-700/50 rounded-lg p-3">
-                          <p className="text-slate-400 text-xs mb-1">Skills</p>
-                          <p className="text-2xl font-bold text-blue-400">
-                            {candidate.resumeSkills.technical.length}
-                          </p>
-                        </div>
-                      </div>
-
-                      {/* Skills Section */}
-                      <div className="space-y-4">
-                        {/* Technical Skills */}
-                        <div>
-                          <p className="text-slate-400 text-xs font-semibold mb-2">
-                            Technical Skills ({candidate.resumeSkills.technical.length})
-                          </p>
-                          {candidate.resumeSkills.technical.length > 0 ? (
-                            <div className="flex flex-wrap gap-1">
-                              {candidate.resumeSkills.technical.slice(0, 8).map((skill) => (
-                                <span
-                                  key={skill}
-                                  className={`text-xs px-2 py-1 rounded ${
-                                    candidate.presentSkills.includes(skill)
-                                      ? "bg-emerald-900/40 text-emerald-300"
-                                      : "bg-blue-900/40 text-blue-300"
-                                  }`}
-                                >
-                                  {skill}
-                                </span>
-                              ))}
-                              {candidate.resumeSkills.technical.length > 8 && (
-                                <span className="text-slate-400 text-xs px-2 py-1">
-                                  +{candidate.resumeSkills.technical.length - 8} more
-                                </span>
-                              )}
-                            </div>
-                          ) : (
-                            <p className="text-slate-500 text-xs italic">No technical skills detected</p>
-                          )}
-                        </div>
-
-                        {/* Soft Skills */}
-                        {candidate.resumeSkills.soft.length > 0 && (
-                          <div>
-                            <p className="text-slate-400 text-xs font-semibold mb-2">Soft Skills</p>
-                            <div className="flex flex-wrap gap-1">
-                              {candidate.resumeSkills.soft.map((skill) => (
-                                <span
-                                  key={skill}
-                                  className="bg-purple-900/40 text-purple-300 text-xs px-2 py-1 rounded"
-                                >
-                                  {skill}
-                                </span>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-
-                        {/* Missing Skills for Job */}
-                        {jobDescription && candidate.missingSkills.length > 0 && (
-                          <div>
-                            <p className="text-slate-400 text-xs font-semibold mb-2">
-                              Missing Skills for Job ({candidate.missingSkills.length})
-                            </p>
-                            <div className="flex flex-wrap gap-1">
-                              {candidate.missingSkills.slice(0, 5).map((skill) => (
-                                <span
-                                  key={skill}
-                                  className="bg-red-900/40 text-red-300 text-xs px-2 py-1 rounded"
-                                >
-                                  {skill}
-                                </span>
-                              ))}
-                              {candidate.missingSkills.length > 5 && (
-                                <span className="text-slate-400 text-xs px-2 py-1">
-                                  +{candidate.missingSkills.length - 5} more
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* Email Modal */}
-      {emailModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-800 rounded-xl border border-slate-700 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
-            <div className="sticky top-0 bg-slate-800 border-b border-slate-700 p-6 flex items-center justify-between">
-              <h2 className="text-2xl font-bold text-white">Send Emails</h2>
-              <button
-                onClick={() => setEmailModal(false)}
-                className="text-slate-400 hover:text-white"
-              >
-                ✕
-              </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
-            <div className="p-6 space-y-6">
-              {/* Recipients Summary */}
-              <div className="bg-slate-700/50 rounded-lg p-4">
-                <p className="text-slate-400 text-sm mb-2">Sending to:</p>
-                <div className="flex flex-wrap gap-2">
-                  {candidates
-                    .filter((c) => selectedCandidates.has(c.id) && c.email)
-                    .map((c) => (
-                      <span
-                        key={c.id}
-                        className="bg-blue-600/30 text-blue-300 px-3 py-1 rounded-full text-sm"
-                      >
-                        {c.email}
-                      </span>
-                    ))}
+            {/* Job Description */}
+            <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 space-y-4">
+              <h3 className="font-bold text-lg">Job Description</h3>
+              <textarea
+                className="w-full h-64 p-4 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none resize-none text-white"
+                placeholder="Paste the job description here..."
+                value={jobDescription}
+                onChange={(e) => setJobDescription(e.target.value)}
+              />
+            </div>
+
+            {/* Rank Button */}
+            <button
+              onClick={rankResumes}
+              disabled={loading || resumes.length === 0 || !jobDescription.trim()}
+              className="w-full py-4 bg-purple-600 hover:bg-purple-500 disabled:bg-gray-700 disabled:cursor-not-allowed rounded-lg font-bold text-lg flex items-center justify-center gap-2 transition"
+            >
+              {loading ? (
+                <>
+                  <Loader className="w-5 h-5 animate-spin" />
+                  Ranking Candidates...
+                </>
+              ) : (
+                <>
+                  <Users className="w-5 h-5" />
+                  Rank All Candidates
+                </>
+              )}
+            </button>
+          </div>
+
+          {/* Right Panel - Summary */}
+          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 h-fit sticky top-24">
+            <h3 className="font-bold text-lg mb-4">Summary</h3>
+            <div className="space-y-4 text-gray-400">
+              <div>
+                <p className="text-sm">Resumes Uploaded</p>
+                <p className="text-3xl font-bold text-purple-400">
+                  {resumes.length}
+                </p>
+              </div>
+              <div>
+                <p className="text-sm">Job Description Status</p>
+                <p className="text-lg font-semibold">
+                  {jobDescription.trim()
+                    ? "✓ Provided"
+                    : "✗ Not provided"}
+                </p>
+              </div>
+              <div className="bg-purple-900/20 border border-purple-900/50 p-4 rounded-lg text-sm">
+                <p className="font-semibold mb-2">Ready to rank?</p>
+                <p>
+                  Upload resumes, add a job description, and click "Rank All
+                  Candidates" to get AI-powered rankings.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : (
+        /* Rankings View */
+        <div className="space-y-6">
+          <button
+            onClick={() => {
+              setRankings(null);
+              setResumes([]);
+              setJobDescription("");
+            }}
+            className="px-6 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg font-semibold transition"
+          >
+            ← Back to Upload
+          </button>
+
+          {rankings.map((candidate, idx) => (
+            <div
+              key={idx}
+              className="bg-gray-900 border border-gray-800 rounded-2xl p-6 space-y-4"
+            >
+              {/* Header */}
+              <div className="flex items-start justify-between">
+                <div className="flex items-start gap-4">
+                  <div className="bg-gradient-to-br from-purple-500 to-purple-600 rounded-lg px-4 py-3 font-bold text-xl text-white">
+                    #{candidate.rank}
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="text-2xl font-bold">
+                      {candidate.candidateName}
+                    </h3>
+                    <p className="text-gray-400 mt-1">
+                      {candidate.verdict}
+                    </p>
+                  </div>
                 </div>
-                <p className="text-slate-400 text-xs mt-3">
-                  {candidates.filter((c) => selectedCandidates.has(c.id) && !c.email).length}{" "}
-                  candidates without email will be skipped
+                <div className="text-right">
+                  <div className="text-4xl font-bold text-purple-400">
+                    {candidate.score}
+                  </div>
+                  <div className="text-sm text-gray-400">Match Score</div>
+                </div>
+              </div>
+
+              {/* Assessment */}
+              <div className="bg-gray-800 p-4 rounded-lg">
+                <p className="text-gray-300 leading-relaxed">
+                  {candidate.overallAssessment}
                 </p>
               </div>
 
-              {/* Email Subject */}
-              <div>
-                <label className="block text-white font-semibold mb-2">Email Subject</label>
-                <input
-                  type="text"
-                  value={emailSubject}
-                  onChange={(e) => setEmailSubject(e.target.value)}
-                  className="w-full bg-slate-700 text-white px-4 py-3 rounded-lg border border-slate-600 focus:border-blue-500 focus:outline-none"
-                  placeholder="Email subject line"
-                />
-              </div>
-
-              {/* Email Message */}
-              <div>
-                <label className="block text-white font-semibold mb-2">Email Message</label>
-                <textarea
-                  value={emailMessage}
-                  onChange={(e) => setEmailMessage(e.target.value)}
-                  rows={6}
-                  className="w-full bg-slate-700 text-white px-4 py-3 rounded-lg border border-slate-600 focus:border-blue-500 focus:outline-none resize-none"
-                  placeholder="Compose your email message"
-                />
-              </div>
-
-              {/* Note */}
-              <div className="bg-amber-600/20 border border-amber-600/50 rounded-lg p-4">
-                <p className="text-amber-200 text-sm">
-                  <strong>Note:</strong> To send actual emails, integrate EmailJS or connect to your email service backend.
-                  This demo prepares the templates for sending.
-                </p>
+              {/* Strengths & Gaps */}
+              <div className="grid md:grid-cols-2 gap-4">
+                <div>
+                  <h4 className="font-bold mb-3 text-emerald-400">Strengths</h4>
+                  <ul className="space-y-2">
+                    {candidate.strengths?.map((s, i) => (
+                      <li key={i} className="flex items-start gap-2">
+                        <span className="text-emerald-400 mt-1">✓</span>
+                        <span className="text-gray-300 text-sm">{s}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+                <div>
+                  <h4 className="font-bold mb-3 text-red-400">Skill Gaps</h4>
+                  <ul className="space-y-2">
+                    {candidate.gaps?.map((g, i) => (
+                      <li key={i} className="flex items-start gap-2">
+                        <span className="text-red-400 mt-1">✗</span>
+                        <span className="text-gray-300 text-sm">{g}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               </div>
 
               {/* Action Buttons */}
-              <div className="flex gap-4">
+              <div className="flex gap-3 pt-4 border-t border-gray-800">
                 <button
-                  onClick={handleSendEmails}
-                  disabled={sendingEmail}
-                  className="flex-1 bg-gradient-to-r from-emerald-600 to-green-600 hover:from-emerald-700 hover:to-green-700 disabled:opacity-50 text-white font-bold py-3 rounded-lg transition-all flex items-center justify-center gap-2"
+                  onClick={() => openEmailDialog(candidate, idx)}
+                  disabled={emailStatus[idx] === "sent"}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-lg font-semibold transition ${
+                    emailStatus[idx] === "sent"
+                      ? "bg-emerald-900/20 text-emerald-400 cursor-not-allowed"
+                      : "bg-purple-600 hover:bg-purple-500"
+                  }`}
                 >
-                  {sendingEmail ? (
+                  {emailStatus[idx] === "sent" ? (
                     <>
-                      <Loader className="w-5 h-5 animate-spin" />
-                      Sending...
+                      <CheckCircle className="w-4 h-4" />
+                      Invited
                     </>
                   ) : (
                     <>
-                      <Send className="w-5 h-5" />
-                      Send Emails
+                      <Mail className="w-4 h-4" />
+                      Send Invite
                     </>
                   )}
                 </button>
-                <button
-                  onClick={() => setEmailModal(false)}
-                  className="flex-1 bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 rounded-lg transition-all"
-                >
-                  Cancel
-                </button>
               </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Email Dialog Modal */}
+      {emailDialog && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-900 border border-gray-800 rounded-2xl max-w-2xl w-full space-y-6 p-8">
+            <h2 className="text-2xl font-bold">
+              Send Interview Invitation to {emailDialog.candidateName}
+            </h2>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-semibold mb-2">
+                  Candidate Email
+                </label>
+                <input
+                  type="email"
+                  className="w-full p-3 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none text-white"
+                  value={emailForm.email}
+                  onChange={(e) =>
+                    setEmailForm((prev) => ({ ...prev, email: e.target.value }))
+                  }
+                  placeholder="candidate@example.com"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold mb-2">
+                  Subject
+                </label>
+                <input
+                  type="text"
+                  className="w-full p-3 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none text-white"
+                  value={emailForm.subject}
+                  onChange={(e) =>
+                    setEmailForm((prev) => ({
+                      ...prev,
+                      subject: e.target.value,
+                    }))
+                  }
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold mb-2">
+                  Email Body
+                </label>
+                <textarea
+                  className="w-full h-40 p-3 bg-gray-800 border border-gray-700 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none resize-none text-white"
+                  value={emailForm.body}
+                  onChange={(e) =>
+                    setEmailForm((prev) => ({ ...prev, body: e.target.value }))
+                  }
+                />
+              </div>
+            </div>
+
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setEmailDialog(null)}
+                className="px-6 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg font-semibold transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={sendInterviewInvite}
+                className="flex items-center gap-2 px-6 py-2 bg-purple-600 hover:bg-purple-500 rounded-lg font-semibold transition"
+              >
+                <Mail className="w-4 h-4" />
+                Send Invitation
+              </button>
             </div>
           </div>
         </div>
